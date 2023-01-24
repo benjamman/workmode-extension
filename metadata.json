@@ -2,6 +2,7 @@
   "name": "Work Mode",
   "description": "Changes the top bar (panel) color and background based on whether you're in work mode, game mode, relax mode etc.",
   "uuid": "workmode@shipment22.github.io",
+  "gschema": "org.gnome.shell.extensions.workmode",
   "shell-version": [
     "43"
   ]
