@@ -18,50 +18,196 @@
 
 /* exported init */
 
-const GETTEXT_DOMAIN = 'my-indicator-extension';
+const GETTEXT_DOMAIN = 'workmode-extension';
 
-const { GObject, St } = imports.gi;
+const { GObject, St, Gio } = imports.gi;
 
 const ExtensionUtils = imports.misc.extensionUtils;
 const Main = imports.ui.main;
 const PanelMenu = imports.ui.panelMenu;
 const PopupMenu = imports.ui.popupMenu;
+const QuickSettings = imports.ui.quickSettings;
+const QuickSettingsMenu = imports.ui.main.panel.statusArea.quickSettings;
 
 const _ = ExtensionUtils.gettext;
 
-const Indicator = GObject.registerClass(
-class Indicator extends PanelMenu.Button {
+const Me = ExtensionUtils.getCurrentExtension();
+let Ext;
+
+const FeatureMenuToggle = GObject.registerClass(
+class FeatureMenuToggle extends QuickSettings.QuickMenuToggle {
     _init() {
-        super._init(0.0, _('My Shiny Indicator'));
-
-        this.add_child(new St.Icon({
-            icon_name: 'face-smile-symbolic',
-            style_class: 'system-status-icon',
-        }));
-
-        let item = new PopupMenu.PopupMenuItem(_('Show Notification'));
-        item.connect('activate', () => {
-            Main.notify(_('Whatʼs up, folks?'));
+        super._init({
+            label: Ext.currentModeLabel() + ' Mode',
+            gicon: Ext.icon(Ext.mode),
+            toggleMode: true,
         });
-        this.menu.addMenuItem(item);
+         this._settings = new Gio.Settings({
+            schema_id: 'org.gnome.shell.extensions.workmode',
+        });
+        this._settings.bind('workmode-enabled',
+            this, 'checked',
+            Gio.SettingsBindFlags.DEFAULT);
+        this.connect('button-press-event', () => Ext.checkEnabled());
+        
+        // This function is unique to this class. It adds a nice header with an
+        // icon, title and optional subtitle. It's recommended you do so for
+        // consistency with other menus.
+        this.menu.setHeader(Ext.icon('logo'), 'Change Mode');
+        
+        // You may also add sections of items to the menu
+        this._itemsSection = new PopupMenu.PopupMenuSection();
+        for (let i in Ext.modes) {
+            const modeLabel = Ext.modes[i].charAt(0).toUpperCase() + Ext.modes[i].substr(1);
+            this._itemsSection.addAction(modeLabel, () => Ext.changeMode(Ext.modes[i]), Ext.icon(Ext.modes[i]));
+        }
+        this.menu.addMenuItem(this._itemsSection);
+
+        // Add an entry-point for more settings
+        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+        const settingsItem = this.menu.addAction('Edit Modes',
+            () => ExtensionUtils.openPrefs());
+            
+        // Ensure the settings are unavailable when the screen is locked
+        settingsItem.visible = Main.sessionMode.allowSettings;
+        this.menu._settingsActions[Extension.uuid] = settingsItem;
+    }
+});
+
+const FeatureIndicator = GObject.registerClass(
+class FeatureIndicator extends QuickSettings.SystemIndicator {
+    _init() {
+        super._init();
+
+        // Create the icon for the indicator
+        this._indicator = this._addIndicator();
+        this._indicator.gicon = Ext.icon(Ext.mode);
+
+        // Create the toggle menu and associate it with the indicator, being
+        // sure to destroy it along with the indicator
+        this.quickSettingsItems.push(new FeatureMenuToggle());
+        
+        this.connect('destroy', () => {
+            this.quickSettingsItems.forEach(item => item.destroy());
+        });
+        
+        // Add the indicator to the panel and the toggle to the menu
+        QuickSettingsMenu._indicators.add_child(this);
+        QuickSettingsMenu._addItems(this.quickSettingsItems);
+    }
+    _displayMode(mode) {
+        if (mode === 'default') {
+            if (this._indicator) {
+                this._indicator.destroy();
+                this._indicator = null;
+            }
+        } else { 
+            if (!this._indicator) this._indicator = this._addIndicator();
+            this._indicator.gicon = Ext.icon(mode);
+        }
+        this.quickSettingsItems.forEach(item => {
+            item.gicon = Ext.icon(Ext.mode);
+            item.label = Ext.currentModeLabel() + ' Mode';
+        });
     }
 });
 
 class Extension {
     constructor(uuid) {
         this._uuid = uuid;
+        Ext = this;
+        this._toggle = null;
+        this.icons = {
+            logo: Gio.icon_new_for_string(`${Me.path}/icons/logo.svg`),
+            work: Gio.icon_new_for_string(`${Me.path}/icons/work.svg`),
+            game: Gio.icon_new_for_string(`${Me.path}/icons/game.svg`),
+            unknown: Gio.icon_new_for_string(`${Me.path}/icons/unknown.svg`),
+            default: Gio.icon_new_for_string(`${Me.path}/icons/default.svg`)
+        };
+        this.modes = [
+            'work',
+            'game',
+            'relax'
+        ];
+        this.mode = 'game';
+        this.previousMode = 'work';
 
         ExtensionUtils.initTranslations(GETTEXT_DOMAIN);
     }
+    checkEnabled() {
+        this._enabled = !this.settings.get_boolean('workmode-enabled');
+        if (!this._enabled) this.updateMode('default', this.mode);
+        else this.updateMode(this.mode, this.previousMode);
+    }
+    icon(mode) {
+        return this.icons[mode] || this.icons.unknown;
+    }
+    currentModeLabel() {
+        const mode = this.modes[this.modes.indexOf(this.mode)] || 'off'
+        return mode.charAt(0).toUpperCase() + mode.substr(1)
+    }
+    changeTopColor(mode, previous) {
+        Main.panel.remove_style_class_name('panel--mode-' + previous);
+        Main.panel.add_style_class_name('panel--mode-' + mode);
+    }
+    changeIndecatorIcon() {
+        if (this._indicator.icons[this.mode]) {
+            this._indicator.icon.gicon = this._indicator.icons[this.mode];
+        } else {
+            this._indicator.icon.gicon = this._indicator.icons.unknown;
+        }
+    }
+    changeBackground(mode) {
+        const background = new Gio.Settings({schema: "org.gnome.desktop.background"}),
+                path = "file://" + Me.path + '/wallpapers/' + mode + '.png';
 
+        log(path)
+
+        let set_prop = (prop) => {
+            if (background.is_writable(prop)) {
+                if (!background.set_string(prop, path)) {
+                    log(`[WorkMode] Failed to write property ${prop}`)
+                }
+            } else {
+                log(`[WorkMode] Property not writable ${prop}`)
+            }
+        }
+
+        const keys = background.list_keys();
+
+        let set_picture_uri = (prop = "picture-uri") => { if (keys.indexOf(prop) !== -1) set_prop(prop) }
+
+        set_picture_uri()
+        set_picture_uri('picture-uri-dark')
+    }
+    changeMode(mode, previous = this.mode, setMode = true) {
+        this.previousMode = previous;
+        this.mode = mode;
+        this.modeNumber = this.modes.indexOf(mode);
+        if (!this._enabled) this.updateMode('default', mode);
+        else this.updateMode(mode, previous);
+    }
+    updateMode(mode, previous) {
+        this.changeTopColor(mode, previous);
+        this._toggle._displayMode(mode);
+        this.changeBackground(mode);
+    }
     enable() {
-        this._indicator = new Indicator();
-        Main.panel.addToStatusArea(this._uuid, this._indicator);
+        this.settings = ExtensionUtils.getSettings(
+            'org.gnome.shell.extensions.workmode');
+
+        this._enabled = this.settings.get_boolean('workmode-enabled');
+
+        this._toggle = new FeatureIndicator();
+        // this._indicator = new Indicator();
+        // Main.panel.addToStatusArea(this._uuid, this._indicator);
     }
 
     disable() {
-        this._indicator.destroy();
-        this._indicator = null;
+        // this._indicator.destroy();
+        // this._indicator = null;
+        this._toggle.destroy();
+        this._toggle = null;
     }
 }
 
